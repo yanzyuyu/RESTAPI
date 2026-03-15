@@ -1,0 +1,160 @@
+import express from "express";
+import cors from "cors";
+import { createServer as createViteServer } from "vite";
+import path from "path";
+import youtubedl from "youtube-dl-exec";
+import ytSearch from "yt-search";
+import qrcode from "qrcode";
+import { v4 as uuidv4 } from "uuid";
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(cors());
+  app.use(express.json());
+
+  // API Routes
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", message: "API is running smoothly!" });
+  });
+
+  // 1. YouTube Search API
+  app.get("/api/yt/search", async (req, res) => {
+    try {
+      const query = req.query.q as string;
+      if (!query) {
+        return res.status(400).json({ error: "Missing query parameter 'q'" });
+      }
+      const r = await ytSearch(query);
+      const videos = r.videos.slice(0, 10).map((v) => ({
+        title: v.title,
+        url: v.url,
+        thumbnail: v.thumbnail,
+        duration: v.timestamp,
+        author: v.author.name,
+        views: v.views,
+      }));
+      res.json({ success: true, data: videos });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 2. YouTube Downloader API (Info & Formats)
+  app.get("/api/yt/download", async (req, res) => {
+    try {
+      const url = req.query.url as string;
+      if (!url) {
+        return res.status(400).json({ error: "Invalid or missing YouTube URL" });
+      }
+      
+      try {
+        const info = await youtubedl(url, {
+          dumpJson: true,
+          noCheckCertificates: true,
+          noWarnings: true,
+          preferFreeFormats: true,
+          addHeader: [
+            'referer:youtube.com',
+            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+          ]
+        });
+        
+        const videoFormats = info.formats
+          .filter((f: any) => f.vcodec !== 'none' && f.acodec !== 'none')
+          .map((f: any) => ({
+            quality: f.format_note || f.resolution || "unknown",
+            url: f.url,
+            mimeType: f.ext,
+          }));
+          
+        const audioFormats = info.formats
+          .filter((f: any) => f.vcodec === 'none' && f.acodec !== 'none')
+          .map((f: any) => ({
+            quality: f.abr ? f.abr + "kbps" : "unknown",
+            url: f.url,
+            mimeType: f.ext,
+          }));
+        
+        res.json({
+          success: true,
+          data: {
+            title: info.title,
+            thumbnail: info.thumbnail,
+            duration: info.duration,
+            videoFormats,
+            audioFormats,
+          },
+        });
+      } catch (err: any) {
+        return res.status(500).json({
+          success: false,
+          error: "Gagal mengambil data dari YouTube. Mungkin diblokir atau URL tidak valid.",
+          originalError: err.message
+        });
+      }
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 3. QR Code Generator API
+  app.get("/api/tools/qrcode", async (req, res) => {
+    try {
+      const text = req.query.text as string;
+      if (!text) {
+        return res.status(400).json({ error: "Missing text parameter" });
+      }
+      const qrDataUrl = await qrcode.toDataURL(text);
+      res.json({ success: true, data: { qrDataUrl } });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 4. UUID Generator API
+  app.get("/api/tools/uuid", (req, res) => {
+    res.json({ success: true, data: { uuid: uuidv4() } });
+  });
+
+  // 5. Base64 Encode/Decode API
+  app.post("/api/tools/base64", (req, res) => {
+    try {
+      const { action, text } = req.body;
+      if (!text || !["encode", "decode"].includes(action)) {
+        return res.status(400).json({ error: "Invalid action or missing text" });
+      }
+      let result = "";
+      if (action === "encode") {
+        result = Buffer.from(text).toString("base64");
+      } else {
+        result = Buffer.from(text, "base64").toString("utf-8");
+      }
+      res.json({ success: true, data: { result } });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
